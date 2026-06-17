@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <poll.h>
+#include <errno.h>
+#include <arpa/inet.h>
 
 #define PORT 8379
 #define MAX_CLIENTS 10
@@ -73,20 +75,39 @@ static int create_server(void) {
     return 0;
 }
 
+static int add_client(int cfd, struct pollfd *pfds, client_t *clients, nfds_t *nfds) {
+    if(*nfds >= MAX_CLIENTS + 1) {
+        return -1;
+    }
+    if(set_nonblocking(cfd) < 0) {
+        perror("client non blocking");
+        close(cfd);
+        return -1;
+    }
+    pfds[*nfds].fd = cfd;
+    pfds[*nfds].events = POLLIN;
+    pfds[*nfds].revents = 0;
+
+    memset(clients[*nfds], 0, sizeof(clients[*nfds]));
+    clients[*nfds].fd = cfd;
+    (*nfds)++;
+    return 0;
+}
+
 int main() {
     signal(SIGPIPE, SIG_IGN);
 	
-	int server = create_server();
-	if(server < 0) {
+	int server_fd = create_server();
+	if(server_fd < 0) {
 		perror("error creating server");
 		return 1;
 	}
 
 	struct pollfd pfds[MAX_CLIENTS + 1];
 	client_t clients[MAX_CLIENTS + 1];
-	size_t nfds = 1;
+	nfds_t nfds = 1;
 
-	pfds[0].fd = server;
+	pfds[0].fd = server_fd;
 	pfds[0].events = POLLIN;
 	pfds[0].revents = 0;
 
@@ -95,9 +116,28 @@ int main() {
 	for (;;) {
 		int rc = poll(pfds, nfds, -1);
 		if (rc < 0) {
-			
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("poll");
+            break;
 		}
 
+        // New connections
+        if(pfds[0].revents & POLLIN) {
+            struct sockaddr_in client_addr;
+            int cfd = accept(server_fd, (struct sockaddr *) &client_addr, sizeof(client_addr));
+            if (cfd < 0) {
+                perror("accept");
+                break;
+            }
+            
+            char ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &client_addr.sin_addr, &ip, sizeof(ip));
+            printf("Accepted %s:%s (fd=%d)\n", ip, ntohs(client_addr.sin_port), cfd);
+
+
+        }
 	}
 
 
