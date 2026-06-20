@@ -6,6 +6,7 @@
 #include <poll.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#include <string.h> 
 
 #define PORT 8379
 #define MAX_CLIENTS 10
@@ -14,9 +15,9 @@
 
 typedef struct {
 	int fd;
-	char outbuf[OUTBUF_SIZE];
-	size_t out_queued;
-	size_t out_sent;
+	char outbuf[OUTBUF_SIZE]; // queued bytes waiting to be sent
+	size_t out_queued; // total bytes currently queued in outbuf
+	size_t out_sent; // bytes already sent from outbuf
 
 } client_t;
 
@@ -88,10 +89,21 @@ static int add_client(int cfd, struct pollfd *pfds, client_t *clients, nfds_t *n
     pfds[*nfds].events = POLLIN;
     pfds[*nfds].revents = 0;
 
-    memset(clients[*nfds], 0, sizeof(clients[*nfds]));
+    memset(&clients[*nfds], 0, sizeof(clients[*nfds]));
     clients[*nfds].fd = cfd;
     (*nfds)++;
     return 0;
+}
+
+static void close_client(int idx, struct pollfd *pfds, client_t *clients, nfds_t *nfds) {
+    close(pfds[idx].fd);
+
+    int last = (*nfds) - 1;
+    if(idx != last) {
+        clients[idx] = clients[last];
+        pfds[idx] = pfds[last];
+    }
+    (*nfds)--;
 }
 
 int main() {
@@ -136,7 +148,59 @@ int main() {
             inet_ntop(AF_INET, &client_addr.sin_addr, &ip, sizeof(ip));
             printf("Accepted %s:%s (fd=%d)\n", ip, ntohs(client_addr.sin_port), cfd);
 
+            if(add_client(cfd, &pfds, &clients, &nfds)) {
+                perror("error adding client");
+                close(cfd);
+            }
+        }
 
+        // Existing connections
+        for(int i = 1; i < nfds; i++) {
+            int re = pfds[i].revents;
+
+            if (re & (POLLERR | POLLHUP | POLLNVAL)) { // POLLHUP is peer disconnected. There may be more data to read. TODO
+                printf("Client disconnected/error fd=%d", pfds[i].fd);
+                close_client(i, pfds, clients, &nfds);
+                continue;
+            }
+
+            int closed = 0;
+
+            // Read data
+            if(re & POLLIN) {
+                char buf[READBUF_SIZE];
+                for(;;) {
+                    int n = recv(pfds[i].fd, buf, sizeof(buf), 0);
+                    if (n > 0) {
+
+                    } else if (n == 0) {
+                        // peer closed cleanly
+                        printf("Client close fd=%d", pfds[i].fd);
+                        close_client(i, pfds, clients, &nfds);
+                        closed = 1;
+                        break;
+                    } else {
+                        if(errno == EAGAIN || errno == EWOULDBLOCK) { // AGAIN and EWOULDBLOCK are basically two names for the same condition on many systems
+                            break;
+                        }
+                        perror("recv");
+                        close_client(i, pfds, clients, &nfds);
+                        closed = 1;
+                        break;
+                    }
+                }
+            }
+            
+            if(closed) {
+                continue;
+            }
+
+            // Write data
+            if(re & POLLOUT) {
+                while(clients[i].out_sent < clients[i].out_queued) {
+                    // int n = send(pfds[i].fd, clients[i].outbuf + clients[i].out_sent, clients[i].out_queued - )
+                }
+            }
         }
 	}
 
