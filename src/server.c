@@ -1,12 +1,13 @@
+#include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/socket.h>
-#include <poll.h>
-#include <errno.h>
-#include <arpa/inet.h>
-#include <string.h> 
+#include <unistd.h>
 
 #define PORT 8379
 #define MAX_CLIENTS 10
@@ -14,10 +15,10 @@
 #define READBUF_SIZE 4096
 
 typedef struct {
-	int fd;
-	char outbuf[OUTBUF_SIZE]; // queued bytes waiting to be sent
-	size_t out_queued; // total bytes currently queued in outbuf
-	size_t out_sent; // bytes already sent from outbuf
+    int fd;
+    char outbuf[OUTBUF_SIZE]; // queued bytes waiting to be sent
+    size_t out_queued;        // total bytes currently queued in outbuf
+    size_t out_sent;          // bytes already sent from outbuf
 
 } client_t;
 
@@ -73,14 +74,15 @@ static int create_server(void) {
         close(fd);
         return -1;
     }
-    return 0;
+    return fd;
 }
 
-static int add_client(int cfd, struct pollfd *pfds, client_t *clients, nfds_t *nfds) {
-    if(*nfds >= MAX_CLIENTS + 1) {
+static int add_client(int cfd, struct pollfd *pfds, client_t *clients,
+                      nfds_t *nfds) {
+    if (*nfds >= MAX_CLIENTS + 1) {
         return -1;
     }
-    if(set_nonblocking(cfd) < 0) {
+    if (set_nonblocking(cfd) < 0) {
         perror("client non blocking");
         close(cfd);
         return -1;
@@ -95,70 +97,110 @@ static int add_client(int cfd, struct pollfd *pfds, client_t *clients, nfds_t *n
     return 0;
 }
 
-static void close_client(int idx, struct pollfd *pfds, client_t *clients, nfds_t *nfds) {
+static int queue_bytes(size_t recv_size, client_t *client, char *buf) {
+
+    // The primary difference between memcpy and memmove is how they handle
+    // overlapping memory regions.
+    //  memcpy assumes the source and destination memory buffers do not overlap,
+    //  resulting in undefined behavior if they do. In contrast, memmove safely
+    //  allows overlapping regions by copying the data in a manner that prevents
+    //  data corruption.
+
+    if (client->out_sent > 0) {
+        if (client->out_sent < client->out_queued) {
+            memmove(client->outbuf, client->outbuf + client->out_sent,
+                    client->out_queued - client->out_sent);
+        }
+        client->out_queued = client->out_queued - client->out_sent;
+        client->out_sent = 0;
+    }
+
+    if (client->out_queued + recv_size > sizeof(client->outbuf)) {
+        return -1;
+    }
+
+    memcpy(client->outbuf + client->out_queued, buf, recv_size);
+    client->out_queued += recv_size;
+    return 0;
+}
+
+static void close_client(int idx, struct pollfd *pfds, client_t *clients,
+                         nfds_t *nfds) {
     close(pfds[idx].fd);
 
     int last = (*nfds) - 1;
-    if(idx != last) {
+    if (idx != last) {
         clients[idx] = clients[last];
         pfds[idx] = pfds[last];
     }
     (*nfds)--;
 }
 
+static void update_events(client_t *client, struct pollfd *pfd) {
+    pfd->events = POLLIN;
+    if (client->out_sent < client->out_queued) {
+        pfd->events |= POLLOUT;
+    }
+}
+
 int main() {
     signal(SIGPIPE, SIG_IGN);
-	
-	int server_fd = create_server();
-	if(server_fd < 0) {
-		perror("error creating server");
-		return 1;
-	}
 
-	struct pollfd pfds[MAX_CLIENTS + 1];
-	client_t clients[MAX_CLIENTS + 1];
-	nfds_t nfds = 1;
+    int server_fd = create_server();
+    if (server_fd < 0) {
+        perror("error creating server");
+        return 1;
+    }
 
-	pfds[0].fd = server_fd;
-	pfds[0].events = POLLIN;
-	pfds[0].revents = 0;
+    struct pollfd pfds[MAX_CLIENTS + 1];
+    client_t clients[MAX_CLIENTS + 1];
+    nfds_t nfds = 1;
 
-	printf("Server listening on port %d\n", PORT);
+    pfds[0].fd = server_fd;
+    pfds[0].events = POLLIN;
+    pfds[0].revents = 0;
 
-	for (;;) {
-		int rc = poll(pfds, nfds, -1);
-		if (rc < 0) {
+    printf("Server listening on port %d\n", PORT);
+
+    for (;;) {
+        int rc = poll(pfds, nfds, -1);
+        if (rc < 0) {
             if (errno == EINTR) {
                 continue;
             }
             perror("poll");
             break;
-		}
+        }
 
         // New connections
-        if(pfds[0].revents & POLLIN) {
+        if (pfds[0].revents & POLLIN) {
             struct sockaddr_in client_addr;
-            int cfd = accept(server_fd, (struct sockaddr *) &client_addr, sizeof(client_addr));
+            socklen_t client_addr_len = sizeof(client_addr);
+            int cfd = accept(server_fd, (struct sockaddr *)&client_addr,
+                             &client_addr_len);
             if (cfd < 0) {
                 perror("accept");
                 break;
             }
-            
-            char ip[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &client_addr.sin_addr, &ip, sizeof(ip));
-            printf("Accepted %s:%s (fd=%d)\n", ip, ntohs(client_addr.sin_port), cfd);
 
-            if(add_client(cfd, &pfds, &clients, &nfds)) {
+            char ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
+            printf("Accepted %s:%d (fd=%d)\n", ip, ntohs(client_addr.sin_port),
+                   cfd);
+
+            if (add_client(cfd, pfds, clients, &nfds)) {
                 perror("error adding client");
                 close(cfd);
             }
         }
 
         // Existing connections
-        for(int i = 1; i < nfds; i++) {
+        for (int i = 1; i < nfds;) {
             int re = pfds[i].revents;
 
-            if (re & (POLLERR | POLLHUP | POLLNVAL)) { // POLLHUP is peer disconnected. There may be more data to read. TODO
+            if (re & (POLLERR | POLLHUP |
+                      POLLNVAL)) { // POLLHUP is peer disconnected. There may be
+                                   // more data to read. TODO
                 printf("Client disconnected/error fd=%d", pfds[i].fd);
                 close_client(i, pfds, clients, &nfds);
                 continue;
@@ -167,20 +209,31 @@ int main() {
             int closed = 0;
 
             // Read data
-            if(re & POLLIN) {
+            if (re & POLLIN) {
                 char buf[READBUF_SIZE];
-                for(;;) {
-                    int n = recv(pfds[i].fd, buf, sizeof(buf), 0);
+                for (;;) {
+                    ssize_t n = recv(pfds[i].fd, buf, sizeof(buf), 0);
                     if (n > 0) {
-
+                        if (queue_bytes(n, &clients[i], buf) < 0) {
+                            printf("Client fd=%d output buffer full. Closing "
+                                   "client\n",
+                                   pfds[i].fd);
+                            close_client(i, pfds, clients, &nfds);
+                            closed = 1;
+                            break;
+                        }
                     } else if (n == 0) {
-                        // peer closed cleanly
+                        // peer closed cleanly. EOF
                         printf("Client close fd=%d", pfds[i].fd);
                         close_client(i, pfds, clients, &nfds);
                         closed = 1;
                         break;
                     } else {
-                        if(errno == EAGAIN || errno == EWOULDBLOCK) { // AGAIN and EWOULDBLOCK are basically two names for the same condition on many systems
+                        if (errno == EAGAIN ||
+                            errno ==
+                                EWOULDBLOCK) { // AGAIN and EWOULDBLOCK are
+                                               // basically two names for the
+                                               // same condition on many systems
                             break;
                         }
                         perror("recv");
@@ -190,20 +243,50 @@ int main() {
                     }
                 }
             }
-            
-            if(closed) {
+
+            if (closed) {
                 continue;
             }
 
             // Write data
-            if(re & POLLOUT) {
-                while(clients[i].out_sent < clients[i].out_queued) {
-                    // int n = send(pfds[i].fd, clients[i].outbuf + clients[i].out_sent, clients[i].out_queued - )
+            if (re & POLLOUT) {
+                while (clients[i].out_sent < clients[i].out_queued) {
+                    ssize_t n = send(
+                        pfds[i].fd, clients[i].outbuf + clients[i].out_sent,
+                        clients[i].out_queued - clients[i].out_sent, 0);
+                    if (n > 0) {
+                        clients[i].out_sent += (size_t)n;
+                    } else if (n < 0 &&
+                               (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                        break;
+                    } else {
+                        perror("send");
+                        close_client(i, pfds, clients, &nfds);
+                        closed = 1;
+                        break;
+                    }
+                }
+
+                if (closed) {
+                    continue;
+                }
+
+                if (clients[i].out_queued == clients[i].out_sent) {
+                    clients[i].out_queued = 0;
+                    clients[i].out_sent = 0;
                 }
             }
-        }
-	}
 
+            if (i < nfds) {
+                update_events(&clients[i], &pfds[i]);
+                i++;
+            }
+        }
+
+        for (int i = 0; i < nfds; i++) {
+            pfds[i].revents = 0;
+        }
+    }
 
     return 0;
 }
