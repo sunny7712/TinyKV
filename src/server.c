@@ -8,19 +8,11 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include "client.h"
 
 #define PORT 8379
 #define MAX_CLIENTS 10
-#define OUTBUF_SIZE 8192
 #define READBUF_SIZE 4096
-
-typedef struct {
-    int fd;
-    char outbuf[OUTBUF_SIZE]; // queued bytes waiting to be sent
-    size_t out_queued;        // total bytes currently queued in outbuf
-    size_t out_sent;          // bytes already sent from outbuf
-
-} client_t;
 
 static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -91,42 +83,16 @@ static int add_client(int cfd, struct pollfd *pfds, client_t *clients,
     pfds[*nfds].events = POLLIN;
     pfds[*nfds].revents = 0;
 
-    memset(&clients[*nfds], 0, sizeof(clients[*nfds]));
-    clients[*nfds].fd = cfd;
+    client_init(cfd, &clients[*nfds]);
+
     (*nfds)++;
     return 0;
 }
 
-static int queue_bytes(size_t recv_size, client_t *client, char *buf) {
-
-    // The primary difference between memcpy and memmove is how they handle
-    // overlapping memory regions.
-    //  memcpy assumes the source and destination memory buffers do not overlap,
-    //  resulting in undefined behavior if they do. In contrast, memmove safely
-    //  allows overlapping regions by copying the data in a manner that prevents
-    //  data corruption.
-
-    if (client->out_sent > 0) {
-        if (client->out_sent < client->out_queued) {
-            memmove(client->outbuf, client->outbuf + client->out_sent,
-                    client->out_queued - client->out_sent);
-        }
-        client->out_queued = client->out_queued - client->out_sent;
-        client->out_sent = 0;
-    }
-
-    if (client->out_queued + recv_size > sizeof(client->outbuf)) {
-        return -1;
-    }
-
-    memcpy(client->outbuf + client->out_queued, buf, recv_size);
-    client->out_queued += recv_size;
-    return 0;
-}
 
 static void close_client(int idx, struct pollfd *pfds, client_t *clients,
                          nfds_t *nfds) {
-    close(pfds[idx].fd);
+    client_free(&clients[idx]);
 
     int last = (*nfds) - 1;
     if (idx != last) {
@@ -195,7 +161,7 @@ int main() {
         }
 
         // Existing connections
-        for (int i = 1; i < nfds;) {
+        for (long unsigned int i = 1; i < nfds;) {
             int re = pfds[i].revents;
 
             if (re & (POLLERR | POLLHUP |
@@ -214,7 +180,7 @@ int main() {
                 for (;;) {
                     ssize_t n = recv(pfds[i].fd, buf, sizeof(buf), 0);
                     if (n > 0) {
-                        if (queue_bytes(n, &clients[i], buf) < 0) {
+                        if (queue_bytes(&clients[i], buf, n) < 0) {
                             printf("Client fd=%d output buffer full. Closing "
                                    "client\n",
                                    pfds[i].fd);
@@ -283,7 +249,7 @@ int main() {
             }
         }
 
-        for (int i = 0; i < nfds; i++) {
+        for (long unsigned int i = 0; i < nfds; i++) {
             pfds[i].revents = 0;
         }
     }
