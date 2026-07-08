@@ -23,14 +23,14 @@ typedef struct {
     size_t out_sent;          // bytes already sent from outbuf
 
     char inbuf[INBUF_SIZE];
-    size_t inbuf_len;
-    size_t inbuf_processed_pos;
+    size_t inbuf_len; // number of bytes in inbuf
+    size_t inbuf_processed_pos; // index up to which inbuf has been processed
 
     parser_state_t parser_state;
-    int args_total;
-    int args_parsed;
-    size_t current_len;
-    size_t current_read;
+    int args_total; // total elements in the input array
+    int args_parsed; 
+    size_t current_len; // current bulk string len
+    size_t current_read; // len of current bulk string parsed
     char **argv;
     int argc;
 
