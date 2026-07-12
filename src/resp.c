@@ -3,20 +3,18 @@
 #include <errno.h>
 #include <limits.h>
 #include "resp.h"
+#include "client.h"
 
-parse_status_t parse_crlf_terminated_integer(char *buf, int current_pos, size_t buf_len, int *out_value, size_t *new_pos) {
-    if (buf == NULL || out_value == NULL || new_pos == NULL) {
+parse_status_t parse_crlf_terminated_integer(char *buf, size_t *current_pos, size_t buf_len, int *out_value) {
+    if (buf == NULL || out_value == NULL || current_pos == NULL) {
         return PARSE_ERR;
     }
-    if (current_pos < 0) {
-        return PARSE_ERR;
-    }
-    if ((size_t)current_pos >= buf_len) {
+    if ((*current_pos) >= buf_len) {
         return PARSE_NEED_MORE;
     }
 
-    void *ptr = memchr(buf + current_pos, '\r', buf_len - (size_t) current_pos);
-    char *start_ptr = buf + current_pos;
+    void *ptr = memchr(buf + *current_pos, '\r', buf_len - (*current_pos));
+    char *start_ptr = buf + *current_pos;
     char *end_ptr = (char *) ptr;
 
     if (end_ptr == NULL) {
@@ -66,6 +64,143 @@ parse_status_t parse_crlf_terminated_integer(char *buf, int current_pos, size_t 
     }
 
     *out_value = (int)value;
-    *new_pos = (size_t)(end_ptr - buf + 2);
+    *current_pos = (size_t)(end_ptr - buf + 2);
     return PARSE_OK;
 }
+
+parse_status_t parse_crlf_terminated_string(char *buf, size_t *current_pos, size_t buf_len, size_t str_len, char *str) {
+    if (buf == NULL || str == NULL || current_pos == NULL) {
+        return PARSE_ERR;
+    }
+    if ((*current_pos) >= buf_len) {
+        return PARSE_NEED_MORE;
+    }
+
+    char *start_ptr = buf + *current_pos;
+    char *end_ptr = buf + *current_pos + str_len - 1;
+
+    if((size_t) (end_ptr - buf + 1) >= buf_len) {
+      return PARSE_NEED_MORE;
+    }
+
+    if ((size_t) (end_ptr - buf + 2) > buf_len) {
+        return PARSE_NEED_MORE;
+    } else if (*(end_ptr + 1) != '\r') {
+        return PARSE_ERR;
+    }
+
+    if ((size_t) (end_ptr - buf + 3) > buf_len) {
+        return PARSE_NEED_MORE;
+    } else if (*(end_ptr + 2) != '\n') {
+        return PARSE_ERR;
+    }
+    
+    memcpy(str, buf + *current_pos, str_len);
+    *current_pos = (size_t)(end_ptr - buf + 3);
+    return PARSE_OK;
+}
+
+parse_status_t parse_start_of_array(char *buf, size_t *current_pos, size_t buf_len) {
+    if (buf == NULL || current_pos == NULL) {
+        return PARSE_ERR;
+    }
+    if ((*current_pos) >= buf_len) {
+        return PARSE_NEED_MORE;
+    }
+
+    if(buf[*current_pos] != '*') {
+        return PARSE_ERR;
+    }
+    
+    *current_pos += 1;
+    return PARSE_OK;
+}
+
+parse_status_t parse_start_of_bulk_string(char *buf, size_t *current_pos, size_t buf_len) {
+    if (buf == NULL || current_pos == NULL) {
+        return PARSE_ERR;
+    }
+    if ((*current_pos) >= buf_len) {
+        return PARSE_NEED_MORE;
+    }
+
+    if(buf[*current_pos] != '$') {
+        return PARSE_ERR;
+    }
+    
+    *current_pos += 1;
+    return PARSE_OK;
+}
+
+
+
+parse_status_t parse_inbuf(client_t *client) {
+    parse_status_t parse_status = PARSE_OK;
+
+    while(parse_status == PARSE_OK) {
+
+        if(client->parser_state == PARSE_START) {
+            parse_status = parse_start_of_array(client->inbuf, &client->inbuf_processed_pos, client->inbuf_len);
+            if(parse_status == PARSE_OK) {
+                client->parser_state = PARSE_ARRAY_LEN;
+                continue;
+            }
+        }
+
+        if(client->parser_state == PARSE_ARRAY_LEN) {
+            int out_value;
+            parse_status = parse_crlf_terminated_integer(client->inbuf, &(client->inbuf_processed_pos), client->inbuf_len, &out_value);
+            if(parse_status == PARSE_OK) {
+                if (out_value > MAX_ARGS) {
+                    return PARSE_ERR;
+                }
+
+                client->parser_state = PARSE_BULK_LEN;
+                client->args_total = out_value;
+                client->args_parsed = 0;
+                continue;
+            } 
+        }
+
+        if(client->parser_state == PARSE_BULK_LEN) {
+            int out_value;
+            parse_status = parse_crlf_terminated_integer(client->inbuf, &(client->inbuf_processed_pos), client->inbuf_len, &out_value);
+            if(parse_status == PARSE_OK) {
+                if(out_value > MAX_BULK_LEN) {
+                    return PARSE_ERR;
+                }
+                void *ptr = malloc((size_t)out_value);
+                if(out_value != 0 && ptr == NULL) {
+                    return PARSE_ERR;
+                }
+                client->argv[client->args_parsed] = (char*) ptr;
+                client->parser_state = PARSE_BULK_DATA;
+                client->current_len = out_value;
+                client->current_read = 0;
+                continue;
+            } 
+        }
+
+        if(client->parser_state == PARSE_BULK_DATA) {
+            parse_status = parse_crlf_terminated_string(client->inbuf, &(client->inbuf_processed_pos), client->inbuf_len, client->current_len, client->argv[client->args_parsed]);
+            if(parse_status == PARSE_OK) {
+                client->args_parsed += 1;
+                if(client->args_parsed == client->args_total) {
+                    client->parser_state = PARSE_START;
+                    client->args_total = 0;
+                    client->args_parsed = 0;
+                    // dispatch command
+                }
+                else {
+                    client->parser_state = PARSE_BULK_LEN;
+                }
+                  
+            }
+        }
+    }
+    return parse_status;
+
+    
+}
+
+

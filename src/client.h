@@ -7,6 +7,8 @@
 #define INBUF_SIZE 8192
 #define MAX_ARGS 100
 
+#define MAX_BULK_LEN 4096
+
 typedef enum {
     PARSE_START,     // In this state, till we parse *
     PARSE_ARRAY_LEN, // Found *, reading digits until \r\n to get args_total
