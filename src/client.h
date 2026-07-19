@@ -2,6 +2,7 @@
 #define CLIENT_H
 
 #include <stddef.h>
+#include "bstr.h"
 
 #define OUTBUF_SIZE 8192
 #define INBUF_SIZE 8192
@@ -33,13 +34,14 @@ typedef struct {
     int args_parsed; 
     size_t current_len; // current bulk string len
     size_t current_read; // len of current bulk string parsed
-    char **argv;
+    bstr_t *argv;
     int argc;
 
 } client_t;
 
 void client_init(int fd, client_t *client);
 void client_free(client_t *client);
+void free_argv(client_t *client);
 int queue_bytes(client_t *client, const char *data, size_t len);
 
 #endif

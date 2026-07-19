@@ -4,6 +4,7 @@
 #include <limits.h>
 #include "resp.h"
 #include "client.h"
+#include "bstr.h"
 
 parse_status_t parse_crlf_terminated_integer(char *buf, size_t *current_pos, size_t buf_len, int *out_value) {
     if (buf == NULL || out_value == NULL || current_pos == NULL) {
@@ -154,10 +155,15 @@ parse_status_t parse_inbuf(client_t *client) {
                 if (out_value > MAX_ARGS) {
                     return PARSE_ERR;
                 }
-
+                void *ptr = malloc(out_value * sizeof(bstr_t));
+                if(ptr == NULL && out_value > 0) {
+                    return PARSE_ERR;
+                }
+                client->argv = (bstr_t *) ptr;
                 client->parser_state = PARSE_BULK_LEN;
                 client->args_total = out_value;
                 client->args_parsed = 0;
+                client->argc = 0;
                 continue;
             } 
         }
@@ -170,10 +176,12 @@ parse_status_t parse_inbuf(client_t *client) {
                     return PARSE_ERR;
                 }
                 void *ptr = malloc((size_t)out_value);
-                if(out_value != 0 && ptr == NULL) {
+                if(ptr == NULL && out_value > 0) {
                     return PARSE_ERR;
                 }
-                client->argv[client->args_parsed] = (char*) ptr;
+                client->argv[client->args_parsed].data = (char *) ptr;
+                client->argv[client->args_parsed].len = out_value;
+                client->argc += 1;
                 client->parser_state = PARSE_BULK_DATA;
                 client->current_len = out_value;
                 client->current_read = 0;
@@ -182,7 +190,7 @@ parse_status_t parse_inbuf(client_t *client) {
         }
 
         if(client->parser_state == PARSE_BULK_DATA) {
-            parse_status = parse_crlf_terminated_string(client->inbuf, &(client->inbuf_processed_pos), client->inbuf_len, client->current_len, client->argv[client->args_parsed]);
+            parse_status = parse_crlf_terminated_string(client->inbuf, &(client->inbuf_processed_pos), client->inbuf_len, client->current_len, client->argv[client->args_parsed].data);
             if(parse_status == PARSE_OK) {
                 client->args_parsed += 1;
                 if(client->args_parsed == client->args_total) {
@@ -190,6 +198,8 @@ parse_status_t parse_inbuf(client_t *client) {
                     client->args_total = 0;
                     client->args_parsed = 0;
                     // dispatch command
+
+                    free_argv(client);
                 }
                 else {
                     client->parser_state = PARSE_BULK_LEN;

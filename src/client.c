@@ -11,15 +11,21 @@ void client_init(int fd, client_t *client) {
 }
 
 void client_free(client_t *client) {
+    free_argv(client);
+    close(client->fd);
+}
+
+void free_argv(client_t *client) {
     if (client->argv) {
         for (int i = 0; i < client->argc; i++) {
-            if (client->argv[i]) {
-                free(client->argv[i]);
+            if (client->argv[i].data) {
+                free(client->argv[i].data);
             }
         }
         free(client->argv);
+        client->argv = NULL;
+        client->argc = 0;
     }
-    close(client->fd);
 }
 
 int queue_bytes(client_t *client, const char *data, size_t len) {

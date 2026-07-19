@@ -2,7 +2,7 @@
 
 A small Redis clone built from scratch in C — no frameworks, no libraries beyond the C standard library and POSIX sockets. Built to learn how Redis actually works internally (event loop, wire protocol, client state, command dispatch) by implementing it, not just reading about it.
 
-**Status:** early-stage / actively changing. Protocol layer (RESP parsing) is implemented and wired end to end; no commands are implemented yet. Expect the architecture below to shift as command dispatch and storage get built.
+**Status:** early-stage / actively changing. Protocol layer (RESP parsing) is fully implemented, but not yet wired into the server's `recv()` path — `parse_inbuf()` exists and works, nothing calls it yet. No commands are implemented. Expect the architecture below to shift as the server wiring, command dispatch, and storage get built.
 
 ## Why
 
@@ -70,11 +70,11 @@ stateDiagram-v2
 
 - [x] Non-blocking TCP server: `socket()`/`bind()`/`listen()`/`accept()`, `poll()`-based event loop, per-client read/write buffering (`src/server.c`)
 - [x] Per-client connection state (`client_t`): input/output buffers, parser state, `argv`/`argc` (`src/client.h`, `src/client.c`)
-- [x] RESP parser wired end to end (`src/resp.h`, `src/resp.c`) — `parse_inbuf()` drives the full state machine above, including pipelining
+- [x] RESP parser fully implemented (`src/resp.h`, `src/resp.c`) — `parse_inbuf()` drives the full state machine above, including pipelining
 - [x] Length-prefixed field parsing (`*N\r\n`, `$L\r\n`) via `parse_crlf_terminated_integer()`; bulk string bodies via `parse_crlf_terminated_string()` (uses the known length directly, not a CRLF scan, since bulk data can itself contain `\r\n`)
 - [x] Protocol bound checks: `args_total ≤ MAX_ARGS` (100), bulk string length `≤ MAX_BULK_LEN` (4KB) — both currently `PARSE_ERR` + silent close, no reply yet
-- [x] Per-argument storage: each parsed arg gets its own `malloc()`'d buffer referenced from `client->argv`
-- [ ] Binary-safe string type (`sds`-style) — designed, not built yet
+- [x] Binary-safe string type (`bstr_t`, `src/bstr.h`/`.c`) — `{len, data}`, takes ownership of a caller-provided buffer, no copy. `client->argv` is a contiguous `bstr_t` array, sized dynamically once `args_total` is known.
+- [ ] Wire `parse_inbuf()` into `server.c`'s `recv()` path — parser is fully built but never called; the server can't process a real command yet
 - [ ] Command dispatch (`argv[0]` → handler)
 - [ ] In-memory key-value store
 - [ ] `PING`, `SET`, `GET` commands
@@ -82,7 +82,7 @@ stateDiagram-v2
 
 ## Roadmap
 
-1. `sds`-style binary-safe string type, replacing raw `char *` in `argv`.
+1. Wire `parse_inbuf()` into `server.c`'s `recv()` path — the parser and `argv` storage are built and unit-testable in isolation, but the server doesn't call `parse_inbuf()` anywhere yet.
 2. Command dispatch: `argv[0]` → handler.
 3. In-memory key-value store (hash table).
 4. `PING`, `SET`, `GET` commands.
@@ -107,7 +107,8 @@ clang-format -i <file>   # format a file before committing
 
 ```
 server.c       — main loop, poll(), accept, connection lifecycle
-client.h/.c    — client_t struct, add_client, close_client, queue_bytes
-resp.h/.c      — RESP parser (implemented), response encoder (not started)
+client.h/.c    — client_t struct, add_client, close_client, queue_bytes, free_argv
+resp.h/.c      — RESP parser (implemented, not yet called from server.c), response encoder (not started)
+bstr.h/.c      — bstr_t binary-safe string type ({len, data}), used for argv
 commands.h/.c  — SET, GET, PING handlers (not started)
 ```
