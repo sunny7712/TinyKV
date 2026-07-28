@@ -2,7 +2,7 @@
 
 A small Redis clone built from scratch in C — no frameworks, no libraries beyond the C standard library and POSIX sockets. Built to learn how Redis actually works internally (event loop, wire protocol, client state, command dispatch) by implementing it, not just reading about it.
 
-**Status:** early-stage / actively changing. Protocol layer (RESP parsing) is fully implemented, but not yet wired into the server's `recv()` path — `parse_inbuf()` exists and works, nothing calls it yet. No commands are implemented. Expect the architecture below to shift as the server wiring, command dispatch, and storage get built.
+**Status:** early-stage / actively changing. Protocol layer (RESP parsing) is fully implemented and wired end to end — `recv()` → `client->inbuf` → `parse_inbuf()` all run on every readable event. No commands are implemented yet. Expect the architecture below to shift as command dispatch and storage get built.
 
 ## Why
 
@@ -47,24 +47,31 @@ stateDiagram-v2
 
     PARSE_START --> PARSE_ARRAY_LEN: saw '*'
     PARSE_ARRAY_LEN --> PARSE_ARRAY_LEN: NEED_MORE
-    PARSE_ARRAY_LEN --> PARSE_BULK_LEN: args_total parsed
+    PARSE_ARRAY_LEN --> PARSE_START: args_total == 0, dispatch
+    PARSE_ARRAY_LEN --> PARSE_BULK_START: args_total parsed, > 0
+
+    PARSE_BULK_START --> PARSE_BULK_START: NEED_MORE
+    PARSE_BULK_START --> PARSE_BULK_LEN: saw '$'
 
     PARSE_BULK_LEN --> PARSE_BULK_LEN: NEED_MORE
     PARSE_BULK_LEN --> PARSE_BULK_DATA: current_len parsed
 
     PARSE_BULK_DATA --> PARSE_BULK_DATA: NEED_MORE
-    PARSE_BULK_DATA --> PARSE_BULK_LEN: more args remain
+    PARSE_BULK_DATA --> PARSE_BULK_START: more args remain
     PARSE_BULK_DATA --> PARSE_START: all args parsed, dispatch
 
     PARSE_START --> CLOSE_CONNECTION: PARSE_ERR
     PARSE_ARRAY_LEN --> CLOSE_CONNECTION: PARSE_ERR
+    PARSE_BULK_START --> CLOSE_CONNECTION: PARSE_ERR
     PARSE_BULK_LEN --> CLOSE_CONNECTION: PARSE_ERR
     PARSE_BULK_DATA --> CLOSE_CONNECTION: PARSE_ERR
 
     CLOSE_CONNECTION --> [*]
 ```
 
-`parse_inbuf()` (`src/resp.c`) drives this loop, calling one of `parse_start_of_array()` / `parse_crlf_terminated_integer()` / `parse_crlf_terminated_string()` per state. Any `PARSE_ERR` from any state closes the connection immediately (no reply sent yet — see [Future functionality](#future-functionality)). On completing a command, state resets to `PARSE_START` rather than terminating, so pipelined commands already sitting in `inbuf` get picked up on the same call.
+`parse_inbuf()` (`src/resp.c`) drives this loop, calling one of `parse_start_of_array()` / `parse_start_of_bulk_string()` / `parse_crlf_terminated_integer()` / `parse_crlf_terminated_string()` per state. Any `PARSE_ERR` from any state closes the connection immediately (no reply sent yet — see [Future functionality](#future-functionality)). On completing a command (or parsing a zero-length array), state resets to `PARSE_START` rather than terminating, so pipelined commands already sitting in `inbuf` get picked up on the same call.
+
+`server.c`'s `recv()` handler appends every received chunk into `client->inbuf` via `append_inbuf()` (bound-checked against `INBUF_SIZE`, compacting already-processed bytes out first if needed), then calls `parse_inbuf()` immediately, then compacts again to reclaim what was just consumed.
 
 ## Current status
 
@@ -74,7 +81,7 @@ stateDiagram-v2
 - [x] Length-prefixed field parsing (`*N\r\n`, `$L\r\n`) via `parse_crlf_terminated_integer()`; bulk string bodies via `parse_crlf_terminated_string()` (uses the known length directly, not a CRLF scan, since bulk data can itself contain `\r\n`)
 - [x] Protocol bound checks: `args_total ≤ MAX_ARGS` (100), bulk string length `≤ MAX_BULK_LEN` (4KB) — both currently `PARSE_ERR` + silent close, no reply yet
 - [x] Binary-safe string type (`bstr_t`, `src/bstr.h`/`.c`) — `{len, data}`, takes ownership of a caller-provided buffer, no copy. `client->argv` is a contiguous `bstr_t` array, sized dynamically once `args_total` is known.
-- [ ] Wire `parse_inbuf()` into `server.c`'s `recv()` path — parser is fully built but never called; the server can't process a real command yet
+- [x] `parse_inbuf()` wired into `server.c`'s `recv()` path — `append_inbuf()`/`compact_inbuf()` (`src/client.c`) manage `client->inbuf` space; every `recv()` feeds the parser immediately
 - [ ] Command dispatch (`argv[0]` → handler)
 - [ ] In-memory key-value store
 - [ ] `PING`, `SET`, `GET` commands
@@ -82,11 +89,10 @@ stateDiagram-v2
 
 ## Roadmap
 
-1. Wire `parse_inbuf()` into `server.c`'s `recv()` path — the parser and `argv` storage are built and unit-testable in isolation, but the server doesn't call `parse_inbuf()` anywhere yet.
-2. Command dispatch: `argv[0]` → handler.
-3. In-memory key-value store (hash table).
-4. `PING`, `SET`, `GET` commands.
-5. Migrate `poll()` → `epoll()` once the protocol layer is solid.
+1. Command dispatch: `argv[0]` → handler.
+2. In-memory key-value store (hash table).
+3. `PING`, `SET`, `GET` commands.
+4. Migrate `poll()` → `epoll()` once the protocol layer is solid.
 
 ## Good to have things
 
@@ -106,9 +112,9 @@ clang-format -i <file>   # format a file before committing
 ## Project layout
 
 ```
-server.c       — main loop, poll(), accept, connection lifecycle
-client.h/.c    — client_t struct, add_client, close_client, queue_bytes, free_argv
-resp.h/.c      — RESP parser (implemented, not yet called from server.c), response encoder (not started)
+server.c       — main loop, poll(), accept, connection lifecycle, drives recv -> append_inbuf -> parse_inbuf
+client.h/.c    — client_t struct, add_client, close_client, queue_bytes, append_inbuf, compact_inbuf, free_argv
+resp.h/.c      — RESP parser (implemented, called from server.c), response encoder (not started)
 bstr.h/.c      — bstr_t binary-safe string type ({len, data}), used for argv
 commands.h/.c  — SET, GET, PING handlers (not started)
 ```
