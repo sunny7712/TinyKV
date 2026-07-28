@@ -77,7 +77,6 @@ parse_status_t parse_crlf_terminated_string(char *buf, size_t *current_pos, size
         return PARSE_NEED_MORE;
     }
 
-    char *start_ptr = buf + *current_pos;
     char *end_ptr = buf + *current_pos + str_len - 1;
 
     if((size_t) (end_ptr - buf + 1) >= buf_len) {
@@ -133,8 +132,6 @@ parse_status_t parse_start_of_bulk_string(char *buf, size_t *current_pos, size_t
     return PARSE_OK;
 }
 
-
-
 parse_status_t parse_inbuf(client_t *client) {
     parse_status_t parse_status = PARSE_OK;
 
@@ -152,6 +149,15 @@ parse_status_t parse_inbuf(client_t *client) {
             int out_value;
             parse_status = parse_crlf_terminated_integer(client->inbuf, &(client->inbuf_processed_pos), client->inbuf_len, &out_value);
             if(parse_status == PARSE_OK) {
+                if(out_value == 0) {
+                    client->parser_state = PARSE_START;
+                    client->args_total = 0;
+                    client->args_parsed = 0;
+                    // dispatch command
+
+                    free_argv(client);
+                    continue;
+                }
                 if (out_value > MAX_ARGS) {
                     return PARSE_ERR;
                 }
@@ -160,12 +166,20 @@ parse_status_t parse_inbuf(client_t *client) {
                     return PARSE_ERR;
                 }
                 client->argv = (bstr_t *) ptr;
-                client->parser_state = PARSE_BULK_LEN;
+                client->parser_state = PARSE_BULK_START;
                 client->args_total = out_value;
                 client->args_parsed = 0;
                 client->argc = 0;
                 continue;
             } 
+        }
+
+        if(client->parser_state == PARSE_BULK_START) {
+            parse_status = parse_start_of_bulk_string(client->inbuf, &(client->inbuf_processed_pos), client->inbuf_len);
+            if(parse_status == PARSE_OK) {
+                client->parser_state = PARSE_BULK_LEN;
+                continue;
+            }
         }
 
         if(client->parser_state == PARSE_BULK_LEN) {
@@ -202,7 +216,7 @@ parse_status_t parse_inbuf(client_t *client) {
                     free_argv(client);
                 }
                 else {
-                    client->parser_state = PARSE_BULK_LEN;
+                    client->parser_state = PARSE_BULK_START;
                 }
                   
             }
@@ -210,7 +224,5 @@ parse_status_t parse_inbuf(client_t *client) {
     }
     return parse_status;
 
-    
 }
-
 

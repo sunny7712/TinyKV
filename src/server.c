@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include "client.h"
+#include "resp.h"
 
 #define PORT 8379
 #define MAX_CLIENTS 10
@@ -180,9 +181,19 @@ int main() {
                 for (;;) {
                     ssize_t n = recv(pfds[i].fd, buf, sizeof(buf), 0);
                     if (n > 0) {
-                        if (queue_bytes(&clients[i], buf, n) < 0) {
-                            printf("Client fd=%d output buffer full. Closing "
+                        if (append_inbuf(&clients[i], buf, (size_t)n) < 0) {
+                            printf("Client fd=%d input buffer full. Closing "
                                    "client\n",
+                                   pfds[i].fd);
+                            close_client(i, pfds, clients, &nfds);
+                            closed = 1;
+                            break;
+                        }
+
+                        parse_status_t parse_status = parse_inbuf(&clients[i]);
+                        if (parse_status == PARSE_ERR ||
+                            compact_inbuf(&clients[i]) < 0) {
+                            printf("Client fd=%d parse error. Closing client\n",
                                    pfds[i].fd);
                             close_client(i, pfds, clients, &nfds);
                             closed = 1;

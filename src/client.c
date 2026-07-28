@@ -53,3 +53,35 @@ int queue_bytes(client_t *client, const char *data, size_t len) {
     client->out_queued += len;
     return 0;
 }
+
+int compact_inbuf(client_t *client) {
+    if (client->inbuf_processed_pos > client->inbuf_len) {
+        return -1;
+    }
+
+    if (client->inbuf_processed_pos > 0) {
+        size_t remaining = client->inbuf_len - client->inbuf_processed_pos;
+        if (remaining > 0) {
+            memmove(client->inbuf, client->inbuf + client->inbuf_processed_pos,
+                    remaining);
+        }
+        client->inbuf_len = remaining;
+        client->inbuf_processed_pos = 0;
+    }
+
+    return 0;
+}
+
+int append_inbuf(client_t *client, const char *data, size_t len) {
+    if (compact_inbuf(client) < 0) {
+        return -1;
+    }
+
+    if (len > sizeof(client->inbuf) - client->inbuf_len) {
+        return -1;
+    }
+
+    memcpy(client->inbuf + client->inbuf_len, data, len);
+    client->inbuf_len += len;
+    return 0;
+}

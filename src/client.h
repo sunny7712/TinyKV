@@ -13,6 +13,7 @@
 typedef enum {
     PARSE_START,     // In this state, till we parse *
     PARSE_ARRAY_LEN, // Found *, reading digits until \r\n to get args_total
+    PARSE_BULK_START, // Found array length, looking for $
     PARSE_BULK_LEN,  // saw $, reading digits until \r\n to get current_len
     PARSE_BULK_DATA  //  know length, reading exactly current_len bytes into
                      //  current arg
@@ -43,5 +44,7 @@ void client_init(int fd, client_t *client);
 void client_free(client_t *client);
 void free_argv(client_t *client);
 int queue_bytes(client_t *client, const char *data, size_t len);
+int compact_inbuf(client_t *client);
+int append_inbuf(client_t *client, const char *data, size_t len);
 
 #endif
