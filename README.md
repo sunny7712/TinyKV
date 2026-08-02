@@ -104,10 +104,12 @@ Will pick it up once core flow is working end to end.
 ## Building
 
 ```
-clang-format -i <file>   # format a file before committing
+make build   # compile build/tinykv-server
+make exec    # build, then run the server
+make format  # format src/*.c and src/*.h with clang-format
 ```
 
-(Makefile and `clang-tidy` linting planned, not yet added.)
+(`clang-tidy` linting planned, not yet added.)
 
 ## Project layout
 

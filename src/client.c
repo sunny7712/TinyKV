@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <string.h>
 
 void client_init(int fd, client_t *client) {
     memset(client, 0, sizeof(*client));

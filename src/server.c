@@ -1,3 +1,5 @@
+#include "client.h"
+#include "resp.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -8,8 +10,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include "client.h"
-#include "resp.h"
 
 #define PORT 8379
 #define MAX_CLIENTS 10
@@ -89,7 +89,6 @@ static int add_client(int cfd, struct pollfd *pfds, client_t *clients,
     (*nfds)++;
     return 0;
 }
-
 
 static void close_client(int idx, struct pollfd *pfds, client_t *clients,
                          nfds_t *nfds) {
