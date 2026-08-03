@@ -1,6 +1,7 @@
 #include "resp.h"
 #include "bstr.h"
 #include "client.h"
+#include "commands.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -177,8 +178,7 @@ parse_status_t parse_inbuf(client_t *client) {
                     client->parser_state = PARSE_START;
                     client->args_total = 0;
                     client->args_parsed = 0;
-                    // dispatch command
-
+                    // no op
                     free_argv(client);
                     continue;
                 }
@@ -242,7 +242,7 @@ parse_status_t parse_inbuf(client_t *client) {
                     client->parser_state = PARSE_START;
                     client->args_total = 0;
                     client->args_parsed = 0;
-                    // dispatch command
+                    dispatch(client);
 
                     free_argv(client);
                 } else {
